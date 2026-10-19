@@ -6,7 +6,7 @@ on:
         type: choice
         description: "分支"
         required: true
-        default: sm8550
+        default: sm8650
         options:
           - sm7550
           - sm7675
@@ -20,7 +20,7 @@ on:
         type: choice
         description: "配置文件"
         required: true
-        default: oneplus_ace2_pro_v
+        default: oneplus_12_b
         options:
           - oneplus_nord_ce4_v
           - oneplus_ace_3v_v
@@ -35,9 +35,8 @@ on:
           - oneplus_ace2_pro_v
           - oneplus_ace3_v
           - oneplus_open_v
-          - 傻逼作者不写下划线找不到一加12
+          - oneplus_12_u
           - oneplus_12_v
-          - 懒逼作者不更新12_b
           - oneplus_12_b
           - oneplus_13r
           - oneplus_ace3_pro_v
@@ -49,12 +48,11 @@ on:
           - oneplus_pad_2_pro
           - oneplus_pad_3
           - oneplus_15
-          - GitHub有bug可能不显示最后一项,误使用此项
       CPUD:
         type: choice
         description: "处理器代号"
         required: true
-        default: kalama
+        default: pineapple
         options:
           - crow
           - waipio
@@ -64,9 +62,9 @@ on:
           - canoe
       ANDROID_VERSION:
         type: choice
-        description: "内核安卓版本"
+        description: "SUSFS GKI/KMI 版本（并非手机的 Android 版本）"
         required: true
-        default: android15
+        default: android14
         options:
           - android12
           - android13
@@ -75,9 +73,9 @@ on:
           - android16
       KERNEL_VERSION:
        type: choice
-       description: "内核版本"
+       description: "Linux 内核版本（必须匹配设备源码）"
        required: true
-       default: "5.15"
+       default: "6.1"
        options:
          - "5.10"
          - "5.15"
@@ -99,9 +97,9 @@ on:
         default: true
       VFS:
         type: boolean
-        description: "是否启用手动钩子？"
+        description: "手动 VFS Hook（当前未实现，一加12请保持关闭）"
         required: true
-        default: true
+        default: false
       KPM:
         type: boolean
         description: "是否启用KPM？"
@@ -118,6 +116,31 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 只对一加 12 做设备专用校验，避免误伤其他机型
+      - name: Validate OnePlus 12 inputs
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event.inputs.ZRAM }}" = "true" ] && [ "${{ github.event.inputs.KERNEL_VERSION }}" = "6.12" ]; then
+            echo "::error::Linux 6.12 没有对应的 LZ4KD 补丁，请关闭 ZRAM 或选择实际支持的内核。"
+            exit 1
+          fi
+          case "${{ github.event.inputs.FEIL }}" in
+            oneplus_12_u|oneplus_12_v|oneplus_12_b)
+              if [ "${{ github.event.inputs.CPU }}" != "sm8650" ] || [ "${{ github.event.inputs.CPUD }}" != "pineapple" ]; then
+                echo "::error::一加 12 只支持 CPU=sm8650、CPUD=pineapple。"
+                exit 1
+              fi
+              if [ "${{ github.event.inputs.ANDROID_VERSION }}" != "android14" ] || [ "${{ github.event.inputs.KERNEL_VERSION }}" != "6.1" ]; then
+                echo "::error::一加 12 的 u/v/b 源码均为 Linux 6.1，SUSFS GKI/KMI 应选择 android14-6.1；手机系统版本不等于 GKI 版本。"
+                exit 1
+              fi
+              if [ "${{ github.event.inputs.VFS }}" = "true" ]; then
+                echo "::error::VFS 参数原本只改文件名，并没有接入 Hook；为了避免假功能，当前一加 12 构建请关闭 VFS。"
+                exit 1
+              fi
+              ;;
+          esac
+
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
         with:
@@ -172,6 +195,23 @@ jobs:
           rm kernel_platform/common/android/abi_gki_protected_exports_* || echo "No protected exports!"
           rm kernel_platform/msm-kernel/android/abi_gki_protected_exports_* || echo "No protected exports!"
 
+      - name: Verify OnePlus 12 source kernel
+        run: |
+          case "${{ github.event.inputs.FEIL }}" in
+            oneplus_12_u|oneplus_12_v|oneplus_12_b)
+              makefile="kernel_workspace/kernel_platform/common/Makefile"
+              major=$(sed -n 's/^VERSION[[:space:]]*=[[:space:]]*//p' "$makefile" | head -n 1)
+              minor=$(sed -n 's/^PATCHLEVEL[[:space:]]*=[[:space:]]*//p' "$makefile" | head -n 1)
+              actual="${major}.${minor}"
+              expected="${{ github.event.inputs.KERNEL_VERSION }}"
+              echo "OnePlus 12 source kernel: $actual, selected: $expected"
+              if [ "$actual" != "$expected" ]; then
+                echo "::error::内核源码为 $actual，而配置选择了 $expected；拒绝使用错误版本的补丁。"
+                exit 1
+              fi
+              ;;
+          esac
+
       # 删除 -dirty 后缀
       - name: Force remove -dirty suffix
         run: |
@@ -201,7 +241,16 @@ jobs:
           git clone https://github.com/ShirkNeko/SukiSU_patch.git
           cd kernel_platform
           echo "正在给内核打susfs补丁"
-          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch ./common/
+          susfs_patch="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch"
+          if [ ! -s "$susfs_patch" ]; then
+            susfs_patch="../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-${{ github.event.inputs.KERNEL_VERSION }}.patch"
+          fi
+          if [ ! -s "$susfs_patch" ]; then
+            echo "::error::SUSFS 上游不提供本次 GKI/内核版本的补丁。"
+            ls -la ../susfs4ksu/kernel_patches/
+            exit 1
+          fi
+          cp "$susfs_patch" ./common/susfs.patch
           cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
 
@@ -214,7 +263,7 @@ jobs:
           fi
 
           cd ./common
-          patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
+          patch --batch --forward -p1 < susfs.patch
           echo "完成"
 
       - name: Apply Hide Stuff Patches
@@ -228,9 +277,14 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform/common
           if [ "${{ github.event.inputs.ZRAM }}" = "true" ]; then
-            cp ../../SukiSU_patch/other/zram/zram_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch ./
+            lz4kd="../../SukiSU_patch/other/zram/zram_patch/${{ github.event.inputs.KERNEL_VERSION }}/lz4kd.patch"
+            if [ ! -s "$lz4kd" ]; then
+              echo "::error::LZ4KD 上游缺少所选内核版本的补丁：$lz4kd"
+              exit 1
+            fi
+            cp "$lz4kd" ./lz4kd.patch
             echo "正在打lz4kd补丁"
-            patch -p1 -F 3 < lz4kd.patch || true
+            patch --batch --forward -p1 -F 3 < lz4kd.patch
             echo '完成LZ4KD补丁'
           fi
 
@@ -243,7 +297,12 @@ jobs:
 
           # SukiSU Ultra config
           echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
+          sed -i '/^CONFIG_KPM=/d; /^# CONFIG_KPM is not set$/d' "$CONFIG_FILE"
+          if [ "${{ github.event.inputs.KPM }}" = "true" ]; then
+            echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
+          else
+            echo "# CONFIG_KPM is not set" >> "$CONFIG_FILE"
+          fi
 
           # SUSFS config
           echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
@@ -390,14 +449,14 @@ jobs:
       - name: Apply patch_linux and replace Image
         if: ${{ github.event.inputs.KPM == 'true' }}
         run: |
-          cd /home/runner/work/Action_OnePlus_MKSU_SUSFS/Action_OnePlus_MKSU_SUSFS/kernel_workspace/kernel_platform/out/msm-kernel-${{ github.event.inputs.CPUD }}-${{ github.event.inputs.BUILD_METHOD }}/dist
-
-          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch_linux
+          cd "$GITHUB_WORKSPACE/AnyKernel3"
+          test -s Image || { echo "::error::没有找到可供 KPM 修补的 Image"; exit 1; }
+          curl -fLSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU_patch/main/kpm/patch_linux" -o patch_linux
           chmod +x patch_linux
           ./patch_linux
-          rm -f Image
-          mv oImage Image
-          cp Image $GITHUB_WORKSPACE/AnyKernel3/Image
+          test -s oImage || { echo "::error::KPM patch_linux 没有输出 oImage"; exit 1; }
+          mv -f oImage Image
+          rm -f patch_linux
 
       # 下载 SUSFS 模块（CI）
       - name: Download Latest SUSFS Module from CI
@@ -428,14 +487,15 @@ jobs:
       - name: Set suffix
         id: suffix
         run: |
-          echo "value=${{ github.event.inputs.KPM == 'true' && '_KPM' || '' }}${{ github.event.inputs.VFS == 'true' && '_VFS' || '' }}${{ github.event.inputs.ZRAM == 'true' && '_LZ4KD' || '' }}" >> $GITHUB_OUTPUT
+          echo "value=${{ github.event.inputs.KPM == 'true' && '_KPM' || '' }}${{ github.event.inputs.ZRAM == 'true' && '_LZ4KD' || '' }}" >> $GITHUB_OUTPUT
 
-      - name: Remove _uv suffix from FEIL
+      - name: Remove Android suffix from FEIL
         id: feil_clean
         run: |
           clean_feil="${{ github.event.inputs.FEIL }}"
-          clean_feil="${clean_feil%_v}"  # 去掉结尾的 _v（如果有）
-          clean_feil="${clean_feil%_u}"  # 去掉结尾的 _u（如果有）
+          clean_feil="${clean_feil%_v}"  # Android 15
+          clean_feil="${clean_feil%_u}"  # Android 14
+          clean_feil="${clean_feil%_b}"  # Android 16
           echo "value=$clean_feil" >> $GITHUB_OUTPUT
 
       - name: Upload AnyKernel3
