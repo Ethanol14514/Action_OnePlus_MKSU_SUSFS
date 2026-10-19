@@ -262,9 +262,41 @@ jobs:
           cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
           fi
 
+          
           cd ./common
+
+          # 适配 OnePlus 12 Android 16 的 fs/proc/base.c
+          if [ "${{ github.event.inputs.FEIL }}" = "oneplus_12_b" ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("susfs.patch")
+          content = p.read_text()
+
+          old = (
+              "@@ -100,6 +100,10 @@\n"
+              " #include <linux/cn_proc.h>\n"
+              " #include <linux/cpufreq_times.h>\n"
+              " #include <linux/dma-buf.h>\n"
+          )
+          new = (
+              "@@ -100,5 +100,9 @@\n"
+              " #include <linux/cn_proc.h>\n"
+              " #include <linux/cpufreq_times.h>\n"
+          )
+
+          if content.count(old) != 1:
+              raise SystemExit(
+                  "SUSFS patch changed; manual review required"
+              )
+
+          p.write_text(content.replace(old, new, 1))
+          PY
+          fi
+
           patch --batch --forward -p1 < susfs.patch
           echo "完成"
+
 
       - name: Apply Hide Stuff Patches
         run: |
